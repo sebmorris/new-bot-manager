@@ -2,7 +2,7 @@ const EventEmitter = require('events').EventEmitter;
 const Bot = require('./Bot.js');
 const InventoryAPI = require('steam-inventory-api');
 
-const Manager = module.exports = {
+const Manager = {
   init(config) {
     this.config = config;
     this.bots = {};
@@ -12,9 +12,10 @@ const Manager = module.exports = {
     const bot = Object.create(Bot);
     const botEvents = ['info', 'err', 'debug', 'warning', 'trade'];
     botEvents.forEach(event => bot.on(event, this.emit.bind(this, event, config.steamid)));
-    for (option in this.config.defaultBot) {
-      if (!config.hasOwnProperty(option)) config[option] = this.config.defaultBot[option];
-    }
+    Object.keys(this.config.defaultBot).forEach((option) => {
+      // eslint-disable-next-line no-param-reassign
+      config[option] = this.config.defaultBot[option];
+    });
     bot.init(config);
     const botLoggedIn = bot.start();
     const botTracked = bot.startTracking();
@@ -27,18 +28,18 @@ const Manager = module.exports = {
   },
   setEvent(type, name, steamid, fn) {
     if (steamid) this.bots[steamid][name].on(type, fn);
-    else Object.keys(this.bots).forEach(steamid => this.bots[steamid][name].on(type, fn));
+    else Object.keys(this.bots).forEach(botSteamid => this.bots[botSteamid][name].on(type, fn));
   },
   botInventories(appid, contextid, steamids = Object.keys(this.bots)) {
     const items = [];
-    steamids.forEach(steamid => {
+    steamids.forEach((steamid) => {
       const relevantItems = this.bots[steamid].inventory.items(appid, contextid);
-      for (id in relevantItems) {
-        items.push(relevantItems[id]);
-      }
+      Object.keys(relevantItems).forEach(id => items.push(relevantItems[id]));
     });
     return items;
-  }
+  },
 };
+
+module.exports = Manager;
 
 Object.setPrototypeOf(Manager, EventEmitter.prototype);
