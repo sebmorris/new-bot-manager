@@ -44,7 +44,7 @@ const Bot = {
       });
       // Called when Steam redirects us to the login page
       this.community.on('sessionExpired', this.retryLogin.bind(this));
-      this.community.startConfirmationChecker(10000 /* , this.config.identity */);
+      this.community.startConfirmationChecker(10000);
       this.community.on('confKeyNeeded', (tag, callback) => {
         const time = SteamTotp.time();
         callback(null, time, SteamTotp.getConfirmationKey(this.config.identity, time, tag));
@@ -126,6 +126,7 @@ const Bot = {
     }
   },
   async newConfirmation(confirmation) {
+    this.emit('info', `Processing confirmation\n${confirmation}`);
     if (confirmation.type !== SteamCommunity.ConfirmationType.Trade) {
       this.emit('warning', 'A non-trade confirmation was created');
       try {
@@ -140,6 +141,7 @@ const Bot = {
       this.emit('info', `Accepted confirmation ${confirmation.id}`);
       this.emit('trade', tradeOfferId, 'confirm.confirmed');
     } catch (confirmationErr) {
+      this.emit('err', `Failed to act on confirmation`, confirmationErr);
       if (confirmationErr.message.toString().includes('Could not act on confirmation')) {
         if (!this.confirmationRetries[confirmation.id]) {
           this.confirmationRetries[confirmation.id] = 0;
@@ -187,7 +189,7 @@ const Bot = {
     return new Promise((resolve, reject) => {
       const offer = this.manager.createOffer(steamid, token);
       const res = this.inventory.itemsAvailable(itemsToGive);
-      if (res) {
+      if (res && itemsToGive.length) {
         this.emit('err', `${res.items ? res.items.length : 'Some'} items not tracked in bots inventory. Trade not sending`, res);
         return reject();
       }
@@ -203,7 +205,7 @@ const Bot = {
     });
   },
   async sentOfferStateChange(offer, oldState) {
-    const stateEnum = this.manager.ETradeOfferState;
+    const stateEnum = TradeOfferManager.ETradeOfferState;
     const state = stateEnum[offer.state];
     this.emit(
       'info',
@@ -269,7 +271,7 @@ const Bot = {
   },
   async checkOfferResolution(offerId, retries = 0) {
     // TODO: separate retries. Maintain currently checking resolution
-    this.emit('err', 'checkOfferResolution function not fully implemented');
+    this.emit('warning', 'checkOfferResolution function not fully implemented');
     let offer;
     try {
       if (offerId.id) {
@@ -285,7 +287,7 @@ const Bot = {
       throw new Error(msg);
     }
 
-    const stateEnum = this.manager.ETradeOfferState;
+    const stateEnum = TradeOfferManager.ETradeOfferState;
     const state = stateEnum[offer.state];
 
     if (
@@ -322,7 +324,7 @@ const Bot = {
       }
     }
 
-    const status = this.manager.ETradeStatus[exchangeDetails.status];
+    const status = TradeOfferManager.ETradeStatus[exchangeDetails.status];
 
     if (status === 'Failed') {
       // Trade has been completely rolled back
@@ -426,7 +428,7 @@ const Bot = {
     if (!this.openTrades[offerId]) {
       this.openTrades[offerId] = new Date();
       setTimeout(
-        this.checkOfferResolution(offerId),
+        this.checkOfferResolution.bind(this, offerId),
         this.config.cancelTime + (10 * 1000),
       );
     }
