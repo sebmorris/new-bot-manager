@@ -78,13 +78,14 @@ const Bot = {
   async retryLogin() {
     if (this.retryingLogin) return;
     this.retryingLogin = true;
-    this.notLoggedIn = true;
+    this.loggedIn = false;
 
     this.emit('info', 'Logging into Steam');
     try {
       const cookies = await this.login();
       await this.setCookies(cookies);
       this.emit('info', 'Logged into Steam successfully');
+      this.loggedIn = true;
       this.retryingLogin = false;
       return;
     } catch (err) {
@@ -217,24 +218,6 @@ const Bot = {
       // Must have been created manually, or lost over restart
     }
 
-    if (
-      offer.state === stateEnum.InEscrow ||
-      offer.state === stateEnum.Countered
-    ) {
-      // TODO: refactor this? Same in checkOfferResolution
-      try {
-        this.emit('info', `Cancelling offer ${offer.id} (state: ${state})`);
-        await this.respondToOffer(offer, false);
-        delete this.openTrades[offer.id];
-        this.inventory.setKey(offer.itemsToGive, 'inTrade', false);
-        this.emit('trade', offer.id, 'offer.failed');
-      } catch (err) {
-        this.emit('err', `Error declining offer ${offer.id}`, err);
-        this.checkOfferNextPoll(offer.id, oldState);
-      }
-      return;
-    }
-
     this.checkOfferResolution(offer)
       .then((res) => {
         this.emit('info', `Changed offer resolved: ${res}`);
@@ -269,8 +252,9 @@ const Bot = {
       });
     });
   },
-  async checkOfferResolution(offerId, retries = 0) {
+  async checkOfferResolution(offerId, retries = {}) {
     // TODO: separate retries. Maintain currently checking resolution
+    // Consider checking for countered offers and cancel
     this.emit('warning', 'checkOfferResolution function not fully implemented');
     let offer;
     try {
@@ -291,12 +275,12 @@ const Bot = {
     const state = stateEnum[offer.state];
 
     if (
-      offer.state === stateEnum.Active ||
-      offer.state === stateEnum.CreatedNeedsConfirmation ||
-      offer.state === stateEnum.Invalid
+      state === 'Active' ||
+      state === 'CreatedNeedsConfirmation' ||
+      state === 'Invalid'
     ) {
       this.addOpenTrade(offerId);
-      return `Offer could still be accepted (state: ${stateEnum[offer.state]}`;
+      return `Offer items could still be exchanged (state: ${state}`;
     }
 
     if (state === 'CreatedNeedsConfirmation') {
@@ -311,16 +295,19 @@ const Bot = {
       this.emit('trade', offerId, 'offer.failed');
       return 'Offer items will no longer be exchanged, processing as such';
     }
+
     let exchangeDetails;
     try {
       exchangeDetails = await this.getExchangeDetails(true, offer);
     } catch (err) {
       this.emit('err', `Error getting exchange details, while checking offer resolution ${offer.id}`, err);
-      if (retries === 5) {
+      if (retries.exchangeDetails === 5) {
         throw new Error(`Exchange details could not be retrieved ${offer.id}`);
       } else {
-        return this.pause(1000 * 10)
-          .then(() => this.checkOfferResolution(offer.id, retries + 1));
+        if (!retries.exchangeDetails) retries.exchangeDetails = 0;
+        retries.exchangeDetails += 1;
+        return this.pause(1000 * 5)
+          .then(() => this.checkOfferResolution(offer.id, retries));
       }
     }
 
@@ -358,9 +345,16 @@ const Bot = {
       status === 'RollbackFailed'
     ) {
       // Mid rollback?
-      this.emit('info', `Trade ${offer.id} has exchangeDetail status 'RollbackFailed'. Retrying in 10 seconds`);
-      return this.pause(1000 * 10)
-        .then(() => this.checkOfferResolution(offer, retries + 1));
+      if (!retries.rollbackFailed) retries.rollbackFailed = 0;
+      this.emit('info', `Trade ${offer.id} has exchangeDetail status 'RollbackFailed'. Retrying in 10 seconds (Retry no. ${retries.rollbackFailed}`);
+      retries.rollbackFailed += 1;
+      if (retries.rollbackFailed === 5) {
+        const msg = `Offer ${offer.id} has kept state 'RollbackFailed' for 5 retries`;
+        this.emit('err', msg);
+        throw new Error(msg);
+      }
+      return this.pause(1000 * 15)
+        .then(() => this.checkOfferResolution(offer.id, retries + 1));
     }
 
     if (status === 'InEscrow') {
@@ -372,7 +366,14 @@ const Bot = {
         this.inventory.setKey(offer.itemsToGive, 'inTrade', false);
         this.emit('trade', offer.id, 'offer.failed');
       } catch (err) {
+        if (!retries.escrowDecline) retries.escrowDecline = 0;
+        retries.escrowDecline += 1;
         // TODO: if retries...
+        if (retries.escrowDecline === 5) {
+          const msg = `Could not decline 'inEscrow' offer ${offer.id}`;
+          this.emit('err', msg, err);
+          throw new Error(msg);
+        }
         this.emit('err', `Error declining offer ${offer.id}`, err);
         return this.pause(1000 * 10)
           .then(() => this.checkOfferResolution(offer, retries + 1));
@@ -383,18 +384,19 @@ const Bot = {
     if (status !== 'Completed') {
       // Items have probably not been exchanged yet - states 'Init', 'PreCommitted' or 'Committed'
       this.emit('warning', `Trade has been 'Accepted' but is not yet 'Completed' ${offer.id} (status)`);
-      if (retries === 5) {
+      if (!retries.notComplete) retries.notComplete = 0;
+      retries.notComplete += 1;
+      if (retries.notComplete === 5) {
+        this.emit('err', `Trade did not become 'Completed' after 5 retries`);
         throw new Error(`Trade is 'Accepted' but not 'Completed' after 5 retries ${offer.id}`);
-      } else {
-        return this.pause(1000 * 10)
-          .then(() => this.checkOfferResolution(offer, retries + 1));
       }
+      return this.pause(1000 * 10)
+        .then(() => this.checkOfferResolution(offer.id, retries + 1));
     }
-    this.emit('trade', offer.id, 'offer.exchanged');
     this.inventory.removeItems(exchangeDetails.sentItems);
+    this.emit('trade', offer.id, 'offer.exchanged');
 
     return this.processReceivedItems(offer);
-    // TODO: Refactor retry into a function and CHECK this function, implement into parent
   },
   respondToOffer(offer, res) {
     return new Promise((resolve, reject) => {
@@ -424,7 +426,8 @@ const Bot = {
       }
     }
   },
-  addOpenTrade(offerId) {
+  addOpenTrade(offerId, itemsToGive = []) {
+    this.inventory.setKey(itemsToGive, 'inTrade', true);
     if (!this.openTrades[offerId]) {
       this.openTrades[offerId] = new Date();
       setTimeout(
